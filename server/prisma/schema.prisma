@@ -1,0 +1,69 @@
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Workspace {
+  id           String   @id @default(cuid())
+  name         String
+  roomCode     String   @unique
+  passwordHash String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  members  Member[]
+  messages Message[]
+}
+
+model Member {
+  id                  String   @id @default(cuid())
+  workspaceId         String
+  username            String
+  usernameNormalized  String
+  role                String   @default("MEMBER")
+  createdAt           DateTime @default(now())
+  lastSeenAt          DateTime?
+
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  messages    Message[]
+  attachments Attachment[]
+
+  @@unique([workspaceId, usernameNormalized])
+  @@index([workspaceId])
+}
+
+model Message {
+  id          String   @id @default(cuid())
+  workspaceId String
+  senderId    String
+  content     String
+  createdAt   DateTime @default(now())
+
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  sender      Member    @relation(fields: [senderId], references: [id], onDelete: Restrict)
+  attachments Attachment[]
+
+  @@index([workspaceId, createdAt])
+  @@index([senderId])
+}
+
+model Attachment {
+  id           String   @id @default(cuid())
+  messageId    String
+  uploaderId   String
+  originalName String
+  storageKey   String   @unique
+  mimeType     String
+  sizeBytes    Int
+  createdAt    DateTime @default(now())
+
+  message  Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  uploader Member  @relation(fields: [uploaderId], references: [id], onDelete: Restrict)
+
+  @@index([messageId])
+}
