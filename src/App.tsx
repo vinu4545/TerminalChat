@@ -11,6 +11,7 @@ import {
   type FormEvent,
 
   type KeyboardEvent,
+  type ChangeEvent,
 
   type ReactNode,
 
@@ -34,7 +35,11 @@ import {
 
   Download,
 
+  FileArchive,
+  FileCode2,
+  FileSpreadsheet,
   FileText,
+  ImageIcon,
 
   Link2,
 
@@ -68,18 +73,23 @@ import {
 
 import {
 
+  Attachment,
   ChatMessage,
 
   clearTerminalSession,
 
   createRoom,
+  deleteMessage,
+  downloadAttachment,
 
+  getAttachments,
   getMessages,
 
   getTerminalSession,
 
   joinRoom,
   leaveTerminal,
+  uploadMessage,
 
   storeTerminalSession,
 
@@ -118,6 +128,7 @@ type Message = {
   own?: boolean
 
   system?: boolean
+  attachments: ChatMessage['attachments']
 
 }
 
@@ -156,6 +167,7 @@ function toMessage(
     }),
 
     own: message.senderId === currentMemberId,
+    attachments: message.attachments,
 
   }
 
@@ -197,6 +209,38 @@ function mergeMessages(
 
   })
 
+}
+
+function mergeAttachments(
+  current: Attachment[],
+  incoming: Attachment[],
+): Attachment[] {
+  const byId = new Map<string, Attachment>()
+  for (const attachment of current) byId.set(attachment.id, attachment)
+  for (const attachment of incoming) byId.set(attachment.id, attachment)
+  return [...byId.values()].sort((a, b) =>
+    (a.createdAt ?? '').localeCompare(b.createdAt ?? ''),
+  )
+}
+
+function formatFileSize(sizeBytes: number) {
+  if (sizeBytes < 1024) return `${sizeBytes} B`
+  if (sizeBytes < 1024 * 1024) return `${(sizeBytes / 1024).toFixed(1)} KB`
+  return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+function AttachmentIcon({ mimeType }: { mimeType: string }) {
+  if (mimeType.startsWith('image/')) return <ImageIcon size={17} />
+  if (mimeType.includes('zip') || mimeType.includes('tar') || mimeType.includes('gzip')) {
+    return <FileArchive size={17} />
+  }
+  if (mimeType.includes('json') || mimeType.includes('xml') || mimeType.includes('yaml')) {
+    return <FileCode2 size={17} />
+  }
+  if (mimeType.includes('sheet') || mimeType.includes('excel')) {
+    return <FileSpreadsheet size={17} />
+  }
+  return <FileText size={17} />
 }
 
 
@@ -332,7 +376,6 @@ function BrandHeader({
               <span>
 
                 {connected ? 'Connected to' : 'Connecting to'}{' '}
-
                 <strong> {connected ? 'workspace' : 'server...'}</strong>
 
               </span>
@@ -340,19 +383,12 @@ function BrandHeader({
             </div>
 
             <button
-
               className="button button-ghost leave-button leave-terminal-button"
-
               onClick={onLeave}
-
               aria-label="Leave terminal"
-
               title="Leave terminal"
-
             >
-
               <LogOut size={15} aria-hidden="true" /> Leave Terminal
-
             </button>
 
           </>
@@ -1087,7 +1123,17 @@ function FormPage({
 
 
 
-function MessageBubble({ message }: { message: Message }) {
+function MessageBubble({
+  message,
+  onDownload,
+  onDelete,
+  deleting,
+}: {
+  message: Message
+  onDownload: (attachment: ChatMessage['attachments'][number]) => void
+  onDelete: (messageId: string) => void
+  deleting: boolean
+}) {
 
   if (message.system) {
 
@@ -1125,7 +1171,35 @@ function MessageBubble({ message }: { message: Message }) {
 
         <p>{message.text}</p>
 
+        {message.attachments.length > 0 && (
+          <div className="message-attachments">
+            {message.attachments.map((attachment) => (
+              <button
+                className="attachment-link"
+                key={attachment.id}
+                onClick={() => onDownload(attachment)}
+                type="button"
+              >
+                <Download size={13} /> {attachment.originalName}
+              </button>
+            ))}
+          </div>
+        )}
+
         {message.own && <CheckCheck size={14} className="read-mark" />}
+
+        {message.own && (
+          <button
+            className="message-delete-button"
+            onClick={() => onDelete(message.id)}
+            disabled={deleting}
+            aria-label={deleting ? 'Deleting message' : 'Delete message'}
+            title={deleting ? 'Deleting message' : 'Delete message'}
+            type="button"
+          >
+            {deleting ? <span className="mini-spinner" /> : <X size={13} />}
+          </button>
+        )}
 
       </div>
 
@@ -1170,12 +1244,14 @@ function Workspace({
 }) {
 
   const [messages, setMessages] = useState<Message[]>([])
+    const [sharedFiles, setSharedFiles] = useState<Attachment[]>([])
 
   const [draft, setDraft] = useState('')
 
   const [sending, setSending] = useState(false)
+  const [deletingMessageId, setDeletingMessageId] = useState<string | null>(null)
 
-  const [attached, setAttached] = useState(false)
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([])
 
   const [connected, setConnected] = useState(false)
 
@@ -1188,6 +1264,8 @@ function Workspace({
   const socketRef = useRef<Socket | null>(null)
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null)
+
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
 
 
 
@@ -1226,7 +1304,6 @@ function Workspace({
       setHistoryError('')
 
 
-
       // Load history after connecting so live events can be received while
 
       // history is being fetched. Message IDs prevent duplicates.
@@ -1255,6 +1332,10 @@ function Workspace({
 
           })
 
+          setSharedFiles((current) =>
+            mergeAttachments(current, loaded.flatMap((message) => message.attachments)),
+          )
+
           setHistoryLoading(false)
 
         })
@@ -1279,7 +1360,19 @@ function Workspace({
 
     })
 
-
+    void getAttachments(session.token)
+      .then((attachments) => {
+        if (active) setSharedFiles(attachments)
+      })
+      .catch((error: unknown) => {
+        if (active) {
+          notify({
+            type: 'error',
+            title: 'Shared files unavailable',
+            message: error instanceof Error ? error.message : 'Unable to load shared files.',
+          })
+        }
+      })
 
     socket.on('presence:list', (payload: { members?: OnlineMember[] }) => {
 
@@ -1387,7 +1480,19 @@ function Workspace({
 
       })
 
+      setSharedFiles((current) => mergeAttachments(current, incoming.attachments))
+
     })
+
+    socket.on(
+      'message:deleted',
+      (payload: { messageId?: string; attachmentIds?: string[] }) => {
+        if (!active || !payload?.messageId) return
+        setMessages((current) => current.filter((item) => item.id !== payload.messageId))
+        const attachmentIds = new Set(payload.attachmentIds ?? [])
+        setSharedFiles((current) => current.filter((file) => !attachmentIds.has(file.id)))
+      },
+    )
 
 
 
@@ -1415,7 +1520,7 @@ function Workspace({
 
 
 
-  const send = () => {
+  const send = async () => {
 
     const content = draft.trim()
 
@@ -1423,7 +1528,87 @@ function Workspace({
 
 
 
-    if (!content || sending) return
+    if ((!content && selectedFiles.length === 0) || sending) return
+
+    if (selectedFiles.length > 0) {
+
+      if (!connected) {
+
+        notify({
+
+          type: 'error',
+
+          title: 'Not connected',
+
+          message: 'Wait for the chat connection to return, then try again.',
+
+        })
+
+        return
+
+      }
+
+
+
+      setSending(true)
+
+      try {
+
+        const saved = toMessage(
+
+          await uploadMessage(session.token, content, selectedFiles),
+
+          session.member.id,
+
+        )
+
+        setMessages((current) =>
+
+          current.some((item) => item.id === saved.id)
+
+            ? current
+
+            : [...current, saved],
+
+        )
+
+        setDraft('')
+
+        setSelectedFiles([])
+
+        setSharedFiles((current) => mergeAttachments(current, saved.attachments))
+
+        notify({
+
+          type: 'success',
+
+          title: 'Attachment sent',
+
+          message: 'Your file was shared with the terminal.',
+
+        })
+
+      } catch (error) {
+
+        notify({
+
+          type: 'error',
+
+          title: 'Upload failed',
+
+          message: error instanceof Error ? error.message : 'Unable to upload files.',
+
+        })
+
+      } finally {
+
+        setSending(false)
+
+      }
+
+      return
+
+    }
 
 
 
@@ -1523,6 +1708,62 @@ function Workspace({
 
 
 
+  const chooseFiles = (event: ChangeEvent<HTMLInputElement>) => {
+
+    const files = Array.from(event.target.files ?? [])
+
+    if (files.length === 0) return
+
+    setSelectedFiles(files.slice(0, 5))
+
+    event.target.value = ''
+
+  }
+
+  const downloadFile = async (
+    attachment: ChatMessage['attachments'][number],
+  ) => {
+    try {
+      const blob = await downloadAttachment(session.token, attachment.id)
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = attachment.originalName
+      link.click()
+      URL.revokeObjectURL(url)
+    } catch (error) {
+      notify({
+        type: 'error',
+        title: 'Download failed',
+        message: error instanceof Error ? error.message : 'Unable to download the attachment.',
+      })
+    }
+  }
+
+  const deleteOwnMessage = async (messageId: string) => {
+    if (deletingMessageId) return
+    if (!window.confirm('Delete this message for everyone in the room?')) return
+
+    setDeletingMessageId(messageId)
+    try {
+      const deleted = await deleteMessage(session.token, messageId)
+      setMessages((current) => current.filter((item) => item.id !== deleted.messageId))
+      const attachmentIds = new Set(deleted.attachmentIds ?? [])
+      setSharedFiles((current) => current.filter((file) => !attachmentIds.has(file.id)))
+      notify({ type: 'success', title: 'Message deleted', message: 'The message was removed from the room.' })
+    } catch (error) {
+      notify({
+        type: 'error',
+        title: 'Could not delete message',
+        message: error instanceof Error ? error.message : 'Please try again.',
+      })
+    } finally {
+      setDeletingMessageId(null)
+    }
+  }
+
+
+
   const keyDown = (event: KeyboardEvent<HTMLInputElement>) => {
 
     if (event.key === 'Enter' && !event.shiftKey) {
@@ -1560,6 +1801,10 @@ function Workspace({
       </div>
 
 
+
+      <button className="workspace-leave" onClick={onLeave} type="button">
+        <LogOut size={15} /> Leave Focus Room
+      </button>
 
       <div className="workspace-grid">
 
@@ -1629,7 +1874,13 @@ function Workspace({
 
             {messages.map((message) => (
 
-              <MessageBubble message={message} key={message.id} />
+              <MessageBubble
+                message={message}
+                key={message.id}
+                onDownload={downloadFile}
+                onDelete={deleteOwnMessage}
+                deleting={deletingMessageId === message.id}
+              />
 
             ))}
 
@@ -1645,37 +1896,29 @@ function Workspace({
 
             <button
 
-              className={`icon-button composer-action ${attached ? 'active' : ''}`}
+              className={`icon-button composer-action ${selectedFiles.length > 0 ? 'active' : ''}`}
 
-              onClick={() => {
-
-                setAttached(!attached)
-
-                notify({
-
-                  type: 'success',
-
-                  title: attached ? 'Attachment removed' : 'Attachment UI only',
-
-                  message: attached
-
-                    ? 'The placeholder attachment was removed.'
-
-                    : 'File upload is not connected yet.',
-
-                })
-
-              }}
+              onClick={() => fileInputRef.current?.click()}
 
               aria-label="Attach a file"
 
-              title="Attach a file"
+              title="Attach files"
 
             >
 
               <Paperclip size={18} />
 
             </button>
+
+            <input
+              ref={fileInputRef}
+              type="file"
+              className="visually-hidden"
+              accept=".jpg,.jpeg,.png,.gif,.webp,.svg,.pdf,.txt,.csv,.md,.json,.xml,.yaml,.yml,.log,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.zip,.tar,.gz,.rar,.c,.h,.cpp,.cc,.cxx,.hpp,.hh,.hxx,.java,.py,.pyw,.js,.jsx,.ts,.tsx,.mjs,.cjs,.html,.htm,.css,.scss,.sh,.bash,.ps1,.bat,.cmd,.sql,.r,.go,.rs,.php,.rb,.swift,.kt,.kts,.dart,.vue,.svelte,.graphql,.proto,.toml,.ini,.conf,.env.example,.gitignore,Dockerfile,Makefile"
+              multiple
+              onChange={chooseFiles}
+              aria-label="Choose files to attach"
+            />
 
 
 
@@ -1705,7 +1948,7 @@ function Workspace({
 
               onClick={send}
 
-              disabled={!draft.trim() || sending || !connected}
+              disabled={(!draft.trim() && selectedFiles.length === 0) || sending || !connected}
 
               aria-label="Send message"
 
@@ -1729,17 +1972,17 @@ function Workspace({
 
 
 
-          {attached && (
+          {selectedFiles.length > 0 && (
 
             <div className="attachment-chip">
 
               <FileText size={14} />
 
-              File upload is not connected
+              {selectedFiles.map((file) => file.name).join(', ')}
 
               <button
 
-                onClick={() => setAttached(false)}
+                onClick={() => setSelectedFiles([])}
 
                 aria-label="Remove attachment"
 
@@ -1845,21 +2088,9 @@ function Workspace({
 
                 aria-label="Upload a file"
 
-                title="Upload a file (not connected yet)"
+                title="Attach files"
 
-                onClick={() =>
-
-                  notify({
-
-                    type: 'error',
-
-                    title: 'Upload not available',
-
-                    message: 'File uploads have not been connected yet.',
-
-                  })
-
-                }
+                onClick={() => fileInputRef.current?.click()}
 
               >
 
@@ -1871,24 +2102,34 @@ function Workspace({
 
 
 
-            <div className="file-row">
-
-              <div className="file-icon">
-
-                <FileText size={17} />
-
-              </div>
-
-              <div className="file-info">
-
-                <strong>No files yet</strong>
-
-                <span>File sharing is not connected</span>
-
-              </div>
-
-              <Download size={15} />
-
+            <div className="shared-file-list">
+              {sharedFiles.length === 0 ? (
+                <div className="file-row">
+                  <div className="file-icon"><FileText size={17} /></div>
+                  <div className="file-info">
+                    <strong>No files yet</strong>
+                    <span>Attach a file to share it here</span>
+                  </div>
+                </div>
+              ) : (
+                sharedFiles.map((file) => (
+                  <div className="file-row" key={file.id}>
+                    <div className="file-icon"><AttachmentIcon mimeType={file.mimeType} /></div>
+                    <div className="file-info">
+                      <strong title={file.originalName}>{file.originalName}</strong>
+                      <span>{formatFileSize(file.sizeBytes)}</span>
+                    </div>
+                    <button
+                      className="mini-icon"
+                      onClick={() => void downloadFile(file)}
+                      aria-label={`Download ${file.originalName}`}
+                      title={`Download ${file.originalName}`}
+                    >
+                      <Download size={15} />
+                    </button>
+                  </div>
+                ))
+              )}
             </div>
 
           </GlassCard>
@@ -1931,12 +2172,6 @@ function Workspace({
 
 
 
-      <button className="workspace-leave" onClick={onLeave}>
-
-        <LogOut size={15} /> Leave Focus Room
-
-      </button>
-
     </main>
 
   )
@@ -1962,6 +2197,7 @@ export default function App() {
 
   const leave = async () => {
     if (leaving) return
+    if (!window.confirm('Leave this Focus Room?')) return
 
     if (!session) {
       clearTerminalSession()

@@ -3,6 +3,11 @@ import type { Server as HttpServer } from "node:http";
 import { Server } from "socket.io";
 import jwt, { type JwtPayload } from "jsonwebtoken";
 import { prisma } from "../lib/prisma";
+import {
+  broadcastMessage,
+  registerMessageBroadcaster,
+  registerMessageDeletedBroadcaster,
+} from "../lib/message-bus";
 
 interface AuthenticatedSocketUser {
   memberId: string;
@@ -62,6 +67,16 @@ export function initializeSocketServer(httpServer: HttpServer) {
     },
   });
 
+  registerMessageBroadcaster((workspaceId, message) => {
+    io.to(`workspace:${workspaceId}`).emit("message:new", message);
+  });
+  registerMessageDeletedBroadcaster((workspaceId, messageId, attachmentIds) => {
+    io.to(`workspace:${workspaceId}`).emit("message:deleted", {
+      messageId,
+      attachmentIds,
+    });
+  });
+
   io.use((socket, next) => {
     try {
       const token = socket.handshake.auth?.token;
@@ -91,6 +106,7 @@ export function initializeSocketServer(httpServer: HttpServer) {
           workspaceId: user.workspaceId,
           username: user.username,
           role: user.role,
+          isActive: true,
         },
         select: {
           id: true,
@@ -209,7 +225,7 @@ export function initializeSocketServer(httpServer: HttpServer) {
               },
             });
 
-            io.to(roomName).emit("message:new", savedMessage);
+            broadcastMessage(user.workspaceId, savedMessage);
 
             acknowledge?.({
               success: true,
