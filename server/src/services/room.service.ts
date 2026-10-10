@@ -1,4 +1,3 @@
-
 import bcrypt from "bcryptjs";
 import { randomBytes } from "node:crypto";
 import jwt from "jsonwebtoken";
@@ -17,18 +16,13 @@ interface JoinRoomInput {
 
 function getJwtSecret(): string {
   const secret = process.env.JWT_SECRET;
-
   if (!secret || secret.length < 32) {
     throw new Error("JWT_SECRET_NOT_CONFIGURED");
   }
-
   return secret;
 }
 
-function isPrismaError(
-  error: unknown,
-  code: string
-): boolean {
+function isPrismaError(error: unknown, code: string): boolean {
   return (
     typeof error === "object" &&
     error !== null &&
@@ -43,7 +37,6 @@ export async function createRoom(input: CreateRoomInput) {
   if (!roomCode || roomCode.length > 64) {
     throw new Error("INVALID_ROOM_CODE");
   }
-
   if (input.password.length < 8 || input.password.length > 128) {
     throw new Error("INVALID_PASSWORD");
   }
@@ -54,10 +47,7 @@ export async function createRoom(input: CreateRoomInput) {
   try {
     return await prisma.$transaction(async (tx) => {
       const workspace = await tx.workspace.create({
-        data: {
-          roomCode,
-          passwordHash,
-        },
+        data: { roomCode, passwordHash },
       });
 
       const member = await tx.member.create({
@@ -66,6 +56,7 @@ export async function createRoom(input: CreateRoomInput) {
           username: "Owner",
           usernameNormalized: "owner",
           role: "OWNER",
+          isActive: true,
         },
       });
 
@@ -76,10 +67,7 @@ export async function createRoom(input: CreateRoomInput) {
           role: member.role,
         },
         secret,
-        {
-          subject: member.id,
-          expiresIn: "2h",
-        }
+        { subject: member.id, expiresIn: "2h" },
       );
 
       return {
@@ -100,7 +88,6 @@ export async function createRoom(input: CreateRoomInput) {
     if (isPrismaError(error, "P2002")) {
       throw new Error("ROOM_CODE_TAKEN");
     }
-
     throw error;
   }
 }
@@ -108,30 +95,15 @@ export async function createRoom(input: CreateRoomInput) {
 export async function joinRoom(input: JoinRoomInput) {
   const roomCode = input.roomCode.trim().toUpperCase();
 
-  if (!roomCode || roomCode.length > 64) {
+  if (!roomCode || roomCode.length > 64 || !input.password || input.password.length > 128) {
     throw new Error("INVALID_CREDENTIALS");
   }
 
-  if (!input.password || input.password.length > 128) {
-    throw new Error("INVALID_CREDENTIALS");
-  }
+  const workspace = await prisma.workspace.findUnique({ where: { roomCode } });
+  if (!workspace) throw new Error("INVALID_CREDENTIALS");
 
-  const workspace = await prisma.workspace.findUnique({
-    where: { roomCode },
-  });
-
-  if (!workspace) {
-    throw new Error("INVALID_CREDENTIALS");
-  }
-
-  const passwordMatches = await bcrypt.compare(
-    input.password,
-    workspace.passwordHash
-  );
-
-  if (!passwordMatches) {
-    throw new Error("INVALID_CREDENTIALS");
-  }
+  const passwordMatches = await bcrypt.compare(input.password, workspace.passwordHash);
+  if (!passwordMatches) throw new Error("INVALID_CREDENTIALS");
 
   const displayName =
     input.displayName?.trim() ||
@@ -145,28 +117,26 @@ export async function joinRoom(input: JoinRoomInput) {
     throw new Error("INVALID_DISPLAY_NAME");
   }
 
-  const usernameNormalized = displayName.toLowerCase();
+  const usernameNormalized = displayName.toLocaleLowerCase("en-US");
+  const normalizedRoomCode = workspace.roomCode.trim().toLocaleLowerCase("en-US");
 
-  const existingMember = await prisma.member.findFirst({
-    where: {
-      workspaceId: workspace.id,
-      usernameNormalized,
-    },
-  });
-
-  if (existingMember) {
-    throw new Error("DISPLAY_NAME_TAKEN");
+  // The terminal's room code is reserved for the owner. Regular members
+  // cannot claim it. (The current create flow names the owner "Owner".)
+  if (usernameNormalized === normalizedRoomCode) {
+    throw new Error("DISPLAY_NAME_RESERVED");
   }
 
   const secret = getJwtSecret();
 
   try {
+    // The database partial unique index is the final concurrency-safe guard.
     const member = await prisma.member.create({
       data: {
         workspaceId: workspace.id,
         username: displayName,
         usernameNormalized,
         role: "MEMBER",
+        isActive: true,
       },
     });
 
@@ -177,29 +147,43 @@ export async function joinRoom(input: JoinRoomInput) {
         role: member.role,
       },
       secret,
-      {
-        subject: member.id,
-        expiresIn: "2h",
-      }
+      { subject: member.id, expiresIn: "2h" },
     );
 
     return {
       token,
-      room: {
-        id: workspace.id,
-        roomCode: workspace.roomCode,
-      },
-      member: {
-        id: member.id,
-        username: member.username,
-        role: member.role,
-      },
+      room: { id: workspace.id, roomCode: workspace.roomCode },
+      member: { id: member.id, username: member.username, role: member.role },
     };
   } catch (error) {
     if (isPrismaError(error, "P2002")) {
       throw new Error("DISPLAY_NAME_TAKEN");
     }
-
     throw error;
   }
+}
+
+/**
+ * Marks a regular member as having explicitly left. The row is retained so
+ * that existing messages and attachments keep their sender relationship.
+ */
+export async function leaveRoom(memberId: string, workspaceId: string) {
+  const member = await prisma.member.findFirst({
+    where: { id: memberId, workspaceId, isActive: true },
+    select: { id: true, role: true },
+  });
+
+  if (!member) return { alreadyLeft: true };
+
+  // The owner is not deactivated by the ordinary member-leave action.
+  if (member.role === "OWNER") {
+    throw new Error("OWNER_CANNOT_LEAVE");
+  }
+
+  await prisma.member.update({
+    where: { id: member.id },
+    data: { isActive: false, lastSeenAt: new Date() },
+  });
+
+  return { alreadyLeft: false };
 }

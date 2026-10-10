@@ -1,4 +1,3 @@
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -20,20 +19,24 @@ model Workspace {
 }
 
 model Member {
-  id                  String   @id @default(cuid())
-  workspaceId         String
-  username            String
-  usernameNormalized  String
-  role                String   @default("MEMBER")
-  createdAt           DateTime @default(now())
-  lastSeenAt          DateTime?
+  id                 String    @id @default(cuid())
+  workspaceId        String
+  username           String
+  usernameNormalized String
+  role               String    @default("MEMBER")
+  isActive           Boolean   @default(true)
+  createdAt          DateTime  @default(now())
+  lastSeenAt         DateTime?
 
-  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspace   Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   messages    Message[]
   attachments Attachment[]
 
-  @@unique([workspaceId, usernameNormalized])
-  @@index([workspaceId])
+  // The active-only uniqueness rule is enforced by the partial SQL index
+  // in the migration. Prisma schema syntax cannot currently express that
+  // partial unique index, so this is a normal lookup index here.
+  @@index([workspaceId, usernameNormalized])
+  @@index([workspaceId, isActive])
 }
 
 model Message {
@@ -43,8 +46,8 @@ model Message {
   content     String
   createdAt   DateTime @default(now())
 
-  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  sender      Member    @relation(fields: [senderId], references: [id], onDelete: Restrict)
+  workspace   Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  sender      Member       @relation(fields: [senderId], references: [id], onDelete: Restrict)
   attachments Attachment[]
 
   @@index([workspaceId, createdAt])
