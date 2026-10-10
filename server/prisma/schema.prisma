@@ -10,7 +10,6 @@ datasource db {
 
 model Workspace {
   id           String   @id @default(cuid())
-  name         String
   roomCode     String   @unique
   passwordHash String
   createdAt    DateTime @default(now())
