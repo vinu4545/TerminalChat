@@ -136,7 +136,9 @@ type Message = {
 
 const API_URL = (
 
-  import.meta.env.VITE_API_URL || 'http://localhost:4545'
+  import.meta.env.DEV
+    ? import.meta.env.VITE_API_URL || 'http://localhost:4545'
+    : 'https://terminalchat-backend.onrender.com'
 
 ).replace(/\/$/, '')
 

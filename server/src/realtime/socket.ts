@@ -62,7 +62,10 @@ export function initializeSocketServer(httpServer: HttpServer) {
 
   const io = new Server(httpServer, {
     cors: {
-      origin: allowedOrigin || "http://localhost:5173",
+      origin: [
+        allowedOrigin || "http://localhost:5173",
+        "https://terminal-sharing.vercel.app",
+      ],
       methods: ["GET", "POST"],
     },
   });
