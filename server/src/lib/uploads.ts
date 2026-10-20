@@ -13,7 +13,10 @@ export const MAX_UPLOAD_FILES = Math.min(
   10,
 );
 
-export const UPLOAD_DIR = path.resolve(process.cwd(), "uploads");
+const configuredUploadDir = process.env.UPLOAD_DIR?.trim();
+export const UPLOAD_DIR = configuredUploadDir
+  ? path.resolve(configuredUploadDir)
+  : path.resolve(process.cwd(), "uploads");
 mkdirSync(UPLOAD_DIR, { recursive: true });
 
 const allowedTypes: Record<string, Set<string>> = {
